@@ -3,7 +3,7 @@ import { nanoid } from "nanoid"
 import { createDb } from "@/lib/db"
 import { emails } from "@/lib/schema"
 import { eq, and, gt, sql } from "drizzle-orm"
-import { EXPIRY_OPTIONS } from "@/types/email"
+import { isValidExpiry, MAX_EXPIRY_MS } from "@/types/email"
 import { EMAIL_CONFIG } from "@/config"
 import { getRequestContext } from "@cloudflare/next-on-pages"
 import { getUserId } from "@/lib/apiKey"
@@ -46,9 +46,9 @@ export async function POST(request: Request) {
       domain: string
     }>()
 
-    if (!EXPIRY_OPTIONS.some(option => option.value === expiryTime)) {
+    if (!isValidExpiry(expiryTime)) {
       return NextResponse.json(
-        { error: "无效的过期时间" },
+        { error: `无效的过期时间，有效期需在 1 分钟到 1 年之间` },
         { status: 400 }
       )
     }
@@ -76,9 +76,7 @@ export async function POST(request: Request) {
     }
 
     const now = new Date()
-    const expires = expiryTime === 0 
-      ? new Date('9999-01-01T00:00:00.000Z')
-      : new Date(now.getTime() + expiryTime)
+    const expires = new Date(now.getTime() + expiryTime)
     
     const emailData: typeof emails.$inferInsert = {
       address,
