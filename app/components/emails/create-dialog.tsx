@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, useMemo, useCallback } from "react"
 import { useTranslations } from "next-intl"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -8,16 +8,19 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Copy, Plus, RefreshCw } from "lucide-react"
 import { useToast } from "@/components/ui/use-toast"
 import { nanoid } from "nanoid"
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group"
 import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { EXPIRY_OPTIONS } from "@/types/email"
+import { EXPIRY_PRESETS, EXPIRY_UNITS, MAX_EXPIRY_MS, MIN_EXPIRY_MS, isValidExpiry } from "@/types/email"
+import type { ExpiryUnitValue } from "@/types/email"
 import { useCopy } from "@/hooks/use-copy"
 import { useConfig } from "@/hooks/use-config"
 
 interface CreateDialogProps {
   onEmailCreated: () => void
 }
+
+/** 自定义有效期的标识值，用于区分预设和自定义模式 */
+const CUSTOM_MODE = "custom"
 
 export function CreateDialog({ onEmailCreated }: CreateDialogProps) {
   const { config } = useConfig()
@@ -28,9 +31,58 @@ export function CreateDialog({ onEmailCreated }: CreateDialogProps) {
   const [loading, setLoading] = useState(false)
   const [emailName, setEmailName] = useState("")
   const [currentDomain, setCurrentDomain] = useState("")
-  const [expiryTime, setExpiryTime] = useState(EXPIRY_OPTIONS[1].value.toString())
   const { toast } = useToast()
   const { copyToClipboard } = useCopy()
+
+  // NOTE: 有效期选择分为预设模式和自定义模式
+  const [selectedPreset, setSelectedPreset] = useState(EXPIRY_PRESETS[1].value.toString())
+  const [customValue, setCustomValue] = useState(1)
+  const [customUnit, setCustomUnit] = useState<ExpiryUnitValue>("day")
+
+  const isCustomMode = selectedPreset === CUSTOM_MODE
+
+  /**
+   * 计算最终要提交的有效期（毫秒）
+   * 预设模式直接使用预设值，自定义模式根据数值和单位计算
+   */
+  const computedExpiryMs = useMemo(() => {
+    if (!isCustomMode) {
+      return parseInt(selectedPreset)
+    }
+    const unitDef = EXPIRY_UNITS.find(u => u.value === customUnit)
+    if (!unitDef) return 0
+    return customValue * unitDef.factor
+  }, [isCustomMode, selectedPreset, customValue, customUnit])
+
+  /**
+   * 获取当前单位允许的最大数值
+   * 确保不超过 1 年上限
+   */
+  const currentUnitMax = useMemo(() => {
+    const unitDef = EXPIRY_UNITS.find(u => u.value === customUnit)
+    return unitDef?.max ?? 365
+  }, [customUnit])
+
+  /** 切换单位时自动将数值修正到合法范围内 */
+  const handleUnitChange = useCallback((newUnit: ExpiryUnitValue) => {
+    setCustomUnit(newUnit)
+    const unitDef = EXPIRY_UNITS.find(u => u.value === newUnit)
+    if (unitDef && customValue > unitDef.max) {
+      setCustomValue(unitDef.max)
+    }
+  }, [customValue])
+
+  /** 处理自定义数值输入，限制在 [1, currentUnitMax] 范围内 */
+  const handleCustomValueChange = useCallback((val: string) => {
+    const num = parseInt(val)
+    if (isNaN(num) || num < 1) {
+      setCustomValue(1)
+    } else if (num > currentUnitMax) {
+      setCustomValue(currentUnitMax)
+    } else {
+      setCustomValue(num)
+    }
+  }, [currentUnitMax])
 
   const generateRandomName = () => setEmailName(nanoid(8))
 
@@ -48,6 +100,15 @@ export function CreateDialog({ onEmailCreated }: CreateDialogProps) {
       return
     }
 
+    if (!isValidExpiry(computedExpiryMs)) {
+      toast({
+        title: tList("error"),
+        description: t("invalidExpiry"),
+        variant: "destructive"
+      })
+      return
+    }
+
     setLoading(true)
     try {
       const response = await fetch("/api/emails/generate", {
@@ -56,7 +117,7 @@ export function CreateDialog({ onEmailCreated }: CreateDialogProps) {
         body: JSON.stringify({
           name: emailName,
           domain: currentDomain,
-          expiryTime: parseInt(expiryTime)
+          expiryTime: computedExpiryMs
         })
       })
 
@@ -93,6 +154,18 @@ export function CreateDialog({ onEmailCreated }: CreateDialogProps) {
       setCurrentDomain(config?.emailDomainsArray[0] ?? "")
     }
   }, [config])
+
+  /** 预设选项的 i18n key 映射 */
+  const presetLabels = [t("oneHour"), t("oneDay"), t("sevenDays"), t("thirtyDays"), t("oneYear")]
+
+  /** 自定义单位的 i18n key 映射 */
+  const unitLabels: Record<ExpiryUnitValue, string> = {
+    minute: t("unitMinute"),
+    hour: t("unitHour"),
+    day: t("unitDay"),
+    week: t("unitWeek"),
+    month: t("unitMonth"),
+  }
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -136,25 +209,61 @@ export function CreateDialog({ onEmailCreated }: CreateDialogProps) {
             </Button>
           </div>
 
-          <div className="flex items-center gap-4">
-            <Label className="shrink-0 text-muted-foreground">{t("expiryTime")}</Label>
-            <RadioGroup
-              value={expiryTime}
-              onValueChange={setExpiryTime}
-              className="flex gap-6"
-            >
-              {EXPIRY_OPTIONS.map((option, index) => {
-                const labels = [t("oneHour"), t("oneDay"), t("threeDays"), t("permanent")]
-                return (
-                  <div key={option.value} className="flex items-center gap-2">
-                    <RadioGroupItem value={option.value.toString()} id={option.value.toString()} />
-                    <Label htmlFor={option.value.toString()} className="cursor-pointer text-sm">
-                      {labels[index]}
-                    </Label>
-                  </div>
-                )
-              })}
-            </RadioGroup>
+          {/* 有效期选择区域 */}
+          <div className="space-y-3">
+            <Label className="text-muted-foreground">{t("expiryTime")}</Label>
+            {/* 预设快捷按钮 */}
+            <div className="flex flex-wrap gap-2">
+              {EXPIRY_PRESETS.map((preset, index) => (
+                <Button
+                  key={preset.value}
+                  type="button"
+                  variant={selectedPreset === preset.value.toString() ? "default" : "outline"}
+                  size="sm"
+                  onClick={() => setSelectedPreset(preset.value.toString())}
+                  className="text-xs"
+                >
+                  {presetLabels[index]}
+                </Button>
+              ))}
+              <Button
+                type="button"
+                variant={isCustomMode ? "default" : "outline"}
+                size="sm"
+                onClick={() => setSelectedPreset(CUSTOM_MODE)}
+                className="text-xs"
+              >
+                {t("custom")}
+              </Button>
+            </div>
+            {/* 自定义输入区域 */}
+            {isCustomMode && (
+              <div className="flex items-center gap-2">
+                <Input
+                  type="number"
+                  min={1}
+                  max={currentUnitMax}
+                  value={customValue}
+                  onChange={(e) => handleCustomValueChange(e.target.value)}
+                  className="w-24"
+                />
+                <Select value={customUnit} onValueChange={(v) => handleUnitChange(v as ExpiryUnitValue)}>
+                  <SelectTrigger className="w-28">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {EXPIRY_UNITS.map(unit => (
+                      <SelectItem key={unit.value} value={unit.value}>
+                        {unitLabels[unit.value]}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="text-xs text-muted-foreground shrink-0">
+                  {t("maxOneYear")}
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -185,4 +294,4 @@ export function CreateDialog({ onEmailCreated }: CreateDialogProps) {
       </DialogContent>
     </Dialog>
   )
-} 
+}
